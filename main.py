@@ -1,15 +1,57 @@
+import json
+import os
 import time
 import webbrowser
 import requests
 
-# Официальный Client ID Minecraft
 CLIENT_ID = "00000000402b5328"
+TOKEN_FILE = "ms_tokens.json"
 
 
-def get_ms_access_token_device_code():
-    """Авторизация через Device Code Flow для MSA (login.live.com)."""
+def save_tokens(token_data: dict):
+    """Сохранение полученных токенов в файл."""
+    with open(TOKEN_FILE, "w", encoding="utf-8") as f:
+        json.dump(token_data, f, indent=4)
+
+
+def load_tokens() -> dict | None:
+    """Загрузка сохранённых токенов."""
+    if os.path.exists(TOKEN_FILE):
+        try:
+            with open(TOKEN_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return None
+    return None
+
+
+def refresh_ms_access_token(refresh_token: str) -> str:
+    """Обновление MS Access Token с помощью refresh_token без участия пользователя."""
+    print("Обновление токена Microsoft в фоновом режиме...")
+    token_url = "https://login.live.com/oauth20_token.srf"
+    data = {
+        "grant_type": "refresh_token",
+        "client_id": CLIENT_ID,
+        "refresh_token": refresh_token,
+        "scope": "XboxLive.signin offline_access"
+    }
+
+    res = requests.post(token_url, data=data)
     
-    # 1. Запрос кода устройства через эндпоинт Live Connect
+    # Если refresh_token устарел или просрочен, сбрасываем файл
+    if res.status_code != 200:
+        print(" Не удалось обновить сессию (токен истёк). Требуется повторный вход.")
+        if os.path.exists(TOKEN_FILE):
+            os.remove(TOKEN_FILE)
+        return None
+
+    tokens = res.json()
+    save_tokens(tokens)  # Сохраняем обновленный refresh_token
+    return tokens["access_token"]
+
+
+def get_ms_access_token_device_code() -> str:
+    """Авторизация через Device Code Flow (только при первом входе)."""
     connect_url = "https://login.live.com/oauth20_connect.srf"
     data = {
         "client_id": CLIENT_ID,
@@ -30,12 +72,9 @@ def get_ms_access_token_device_code():
     print(f" ВАШ КОД ВХОДА:  {user_code}")
     print(f" Страница входа: {verification_uri}")
     print("=" * 50)
-    print("Открытие браузера...")
 
-    # Автоматически открываем страницу ввода кода
     webbrowser.open(verification_uri)
 
-    # 2. Опрос сервера Microsoft (login.live.com) в ожидании ввода кода
     token_url = "https://login.live.com/oauth20_token.srf"
     token_data = {
         "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
@@ -50,7 +89,8 @@ def get_ms_access_token_device_code():
         res_json = token_res.json()
 
         if "access_token" in res_json:
-            print(" Авторизация прошла успешно!")
+            print(" Первичная авторизация прошла успешно!")
+            save_tokens(res_json)  # Запоминаем refresh_token для следующих запусков
             return res_json["access_token"]
 
         error = res_json.get("error")
@@ -62,6 +102,19 @@ def get_ms_access_token_device_code():
             raise Exception("Время действия кода истекло. Запустите скрипт снова.")
         else:
             raise Exception(f"Ошибка авторизации: {res_json.get('error_description', error)}")
+
+
+def get_or_refresh_ms_token() -> str:
+    """Умная функция: берет сохраненный токен или запрашивает логин."""
+    saved_tokens = load_tokens()
+
+    if saved_tokens and "refresh_token" in saved_tokens:
+        ms_token = refresh_ms_access_token(saved_tokens["refresh_token"])
+        if ms_token:
+            return ms_token
+
+    # Если сохранённых данных нет или они невалидны — запрашиваем вход через браузер
+    return get_ms_access_token_device_code()
 
 
 def get_minecraft_profile(ms_access_token: str):
@@ -100,20 +153,8 @@ def get_minecraft_profile(ms_access_token: str):
         "TokenType": "JWT"
     }
     xsts_res = requests.post("https://xsts.auth.xboxlive.com/xsts/authorize", json=xsts_payload, headers=headers)
-    
-    if xsts_res.status_code == 401:
-        data = xsts_res.json()
-        error_code = data.get("XErr")
-        if error_code == 2148916238:
-            raise Exception("Учетная запись принадлежит ребенку. Добавьте её в семейную группу Xbox.")
-        elif error_code == 2148916233:
-            raise Exception("У аккаунта нет профиля Xbox. Создайте его на xbox.com.")
-        else:
-            raise Exception(f"Ошибка XSTS (Код: {error_code})")
-
     xsts_res.raise_for_status()
-    xsts_data = xsts_res.json()
-    xsts_token = xsts_data["Token"]
+    xsts_token = xsts_res.json()["Token"]
 
     # 3. Minecraft Access Token
     print("[3/4] Авторизация в Minecraft Services...")
@@ -150,7 +191,8 @@ def get_minecraft_profile(ms_access_token: str):
 
 def main():
     try:
-        ms_token = get_ms_access_token_device_code()
+        # Автоматически выберет: обновить старый токен или запросить новый
+        ms_token = get_or_refresh_ms_token()
         mc_info = get_minecraft_profile(ms_token)
 
         print("\n" + "=" * 50)
