@@ -135,12 +135,18 @@ def get_minecraft_profile(ms_access_token: str):
         "RelyingParty": "http://auth.xboxlive.com",
         "TokenType": "JWT"
     }
-    xbl_res = requests.post("https://user.auth.xboxlive.com/user/authenticate", json=xbl_payload, headers=headers)
+
+    xbl_res = requests.post(
+        "https://user.auth.xboxlive.com/user/authenticate",
+        json=xbl_payload,
+        headers=headers
+    )
     xbl_res.raise_for_status()
+
     xbl_data = xbl_res.json()
 
     xbl_token = xbl_data["Token"]
-    user_hash = xbl_data["DisplayClaims"]["xui"][0]["uhs"]
+    xuid = xbl_data["DisplayClaims"]["xui"][0]["uhs"]
 
     # 2. XSTS Token
     print("[2/4] Получение XSTS токена...")
@@ -152,58 +158,86 @@ def get_minecraft_profile(ms_access_token: str):
         "RelyingParty": "rp://api.minecraftservices.com/",
         "TokenType": "JWT"
     }
-    xsts_res = requests.post("https://xsts.auth.xboxlive.com/xsts/authorize", json=xsts_payload, headers=headers)
+
+    xsts_res = requests.post(
+        "https://xsts.auth.xboxlive.com/xsts/authorize",
+        json=xsts_payload,
+        headers=headers
+    )
     xsts_res.raise_for_status()
+
     xsts_token = xsts_res.json()["Token"]
 
     # 3. Minecraft Access Token
     print("[3/4] Авторизация в Minecraft Services...")
     mc_payload = {
-        "identityToken": f"XBL3.0 x={user_hash};{xsts_token}"
+        "identityToken": f"XBL3.0 x={xuid};{xsts_token}"
     }
-    mc_res = requests.post("https://api.minecraftservices.com/authentication/login_with_xbox", json=mc_payload, headers=headers)
-    
+
+    mc_res = requests.post(
+        "https://api.minecraftservices.com/authentication/login_with_xbox",
+        json=mc_payload,
+        headers=headers
+    )
+
     if mc_res.status_code != 200:
-        raise Exception(f"Ошибка Minecraft Auth ({mc_res.status_code}): {mc_res.text}")
-        
+        # Даже если Minecraft Services не выдал токен,
+        # данные Xbox Live всё ещё известны.
+        return {
+            "username": "no_license",
+            "uuid": "no_license",
+            "accessToken": "no_license",
+            "xuid": xuid
+        }
+
     mc_access_token = mc_res.json()["access_token"]
 
-    # 4. Профиль игрока
+    # 4. Профиль Minecraft
     print("[4/4] Запрос профиля Minecraft...")
+
     auth_headers = {
         "Authorization": f"Bearer {mc_access_token}",
         "User-Agent": headers["User-Agent"]
     }
-    profile_res = requests.get("https://api.minecraftservices.com/minecraft/profile", headers=auth_headers)
 
+    profile_res = requests.get(
+        "https://api.minecraftservices.com/minecraft/profile",
+        headers=auth_headers
+    )
+
+    # Нет лицензии / Minecraft-профиля
     if profile_res.status_code == 404:
-        raise Exception("На этом аккаунте Microsoft не куплена лицензия Minecraft!")
+        return {
+            "username": "no_license",
+            "uuid": "no_license",
+            "accessToken": mc_access_token,
+            "xuid": xuid
+        }
 
     profile_res.raise_for_status()
+
     profile_data = profile_res.json()
 
     return {
-        "mc_access_token": mc_access_token,
+        "username": profile_data["name"],
         "uuid": profile_data["id"],
-        "username": profile_data["name"]
+        "accessToken": mc_access_token,
+        "xuid": xuid
     }
-
 
 def main():
     try:
-        # Автоматически выберет: обновить старый токен или запросить новый
         ms_token = get_or_refresh_ms_token()
         mc_info = get_minecraft_profile(ms_token)
 
         print("\n" + "=" * 50)
-        print(" УСПЕШНАЯ АВТОРИЗАЦИЯ MINECRAFT")
+        print(" АВТОРИЗАЦИЯ")
         print("=" * 50)
-        print(f"Никнейм:          {mc_info['username']}")
-        print(f"UUID:             {mc_info['uuid']}")
-        print(f"MC Access Token:  {mc_info['mc_access_token']}")
+        print(f"Username:     {mc_info['username']}")
+        print(f"UUID:         {mc_info['uuid']}")
+        print(f"AccessToken:  {mc_info['accessToken']}")
+        print(f"XUID:         {mc_info['xuid']}")
         print("=" * 50)
-        print("\nАргументы для передачи клиенту игры:")
-        print(f"--username {mc_info['username']} --uuid {mc_info['uuid']} --accessToken {mc_info['mc_access_token']} --userType msa")
 
     except Exception as e:
         print(f"\nОшибка: {e}")
